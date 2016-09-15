@@ -27,10 +27,13 @@ internal class AnnotationConstructorCaller(
         private val jClass: Class<*>,
         private val parameterNames: List<String>,
         private val areOptionalArgumentsAllowed: Boolean,
+        origin: Origin,
         methods: List<ReflectMethod> = parameterNames.map { name -> jClass.getDeclaredMethod(name) }
 ) : FunctionCaller<Nothing?>(
         null, jClass, null, methods.map { it.genericReturnType }.toTypedArray() // TODO: test javaType for annotation constructor parameter
 ) {
+    enum class Origin { JAVA, KOTLIN }
+
     // Transform primitive int to java.lang.Integer because actual arguments passed here will be boxed and Class#isInstance should succeed
     private val erasedParameterTypes: List<Class<*>> = methods.map { method -> method.returnType.let { it.wrapperByPrimitive ?: it } }
 
@@ -42,6 +45,17 @@ internal class AnnotationConstructorCaller(
             value is Class<*> -> Reflection.getOrCreateKotlinClass(value)
             value is Array<*> && value.isArrayOf<Class<*>>() -> Reflection.getOrCreateKotlinClasses(value as Array<Class<*>>)
             else -> value
+        }
+    }
+
+    init {
+        // TODO: consider lifting this restriction once KT-8957 is implemented
+        if (!areOptionalArgumentsAllowed && origin == Origin.JAVA && (parameterNames - "value").isNotEmpty()) {
+            throw UnsupportedOperationException(
+                    "Positional call of a Java annotation constructor is allowed only if there are no parameters " +
+                    "or one parameter named \"value\". This restriction exists because Java annotations (in contrast to Kotlin)" +
+                    "do not impose any order on their arguments. Use KCallable#callBy instead."
+            )
         }
     }
 
@@ -85,7 +99,7 @@ private fun throwIllegalArgumentType(index: Int, name: String, expectedJvmType: 
 }
 
 private fun createAnnotationInstance(annotationClass: Class<*>, values: Map<String, Any>): Any {
-    return Proxy.newProxyInstance(annotationClass.classLoader /* TODO: test */, arrayOf(annotationClass)) { proxy, method, args ->
+    return Proxy.newProxyInstance(annotationClass.classLoader, arrayOf(annotationClass)) { proxy, method, args ->
         // TODO: support equals, hashCode, toString, annotationType
         values[method.name] ?: throw KotlinReflectionInternalError("Method is not supported: $method (args: ${args.orEmpty().toList()})")
     }
