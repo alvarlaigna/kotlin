@@ -21,6 +21,7 @@ import com.intellij.psi.PsiElement;
 import com.intellij.util.ArrayUtil;
 import com.intellij.util.Function;
 import com.intellij.util.containers.ContainerUtil;
+import kotlin.collections.CollectionsKt;
 import kotlin.jvm.functions.Function1;
 import kotlin.text.StringsKt;
 import org.jetbrains.annotations.NotNull;
@@ -207,7 +208,8 @@ public class FunctionCodegen {
                     getThisTypeForFunction(functionDescriptor, methodContext, typeMapper),
                     new Label(),
                     new Label(),
-                    contextKind
+                    contextKind,
+                    typeMapper
             );
 
             mv.visitEnd();
@@ -395,7 +397,8 @@ public class FunctionCodegen {
         mv.visitLabel(methodEnd);
 
         Type thisType = getThisTypeForFunction(functionDescriptor, context, typeMapper);
-        generateLocalVariableTable(mv, signature, functionDescriptor, thisType, methodBegin, methodEnd, context.getContextKind());
+        generateLocalVariableTable(
+                mv, signature, functionDescriptor, thisType, methodBegin, methodEnd, context.getContextKind(), typeMapper);
 
         if (context.isInlineMethodContext() && functionFakeIndex != -1) {
             mv.visitLocalVariable(
@@ -436,11 +439,12 @@ public class FunctionCodegen {
             @Nullable Type thisType,
             @NotNull Label methodBegin,
             @NotNull Label methodEnd,
-            @NotNull OwnerKind ownerKind
+            @NotNull OwnerKind ownerKind,
+            @NotNull KotlinTypeMapper typeMapper
     ) {
         generateLocalVariablesForParameters(mv, jvmMethodSignature, thisType, methodBegin, methodEnd,
                                             functionDescriptor.getValueParameters(),
-                                            AsmUtil.isStaticMethod(ownerKind, functionDescriptor));
+                                            AsmUtil.isStaticMethod(ownerKind, functionDescriptor), typeMapper);
     }
 
     public static void generateLocalVariablesForParameters(
@@ -450,7 +454,8 @@ public class FunctionCodegen {
             @NotNull Label methodBegin,
             @NotNull Label methodEnd,
             Collection<ValueParameterDescriptor> valueParameters,
-            boolean isStatic
+            boolean isStatic,
+            KotlinTypeMapper typeMapper
     ) {
         Iterator<ValueParameterDescriptor> valueParameterIterator = valueParameters.iterator();
         List<JvmMethodParameterSignature> params = jvmMethodSignature.getValueParameters();
@@ -474,7 +479,10 @@ public class FunctionCodegen {
 
             if (kind == JvmMethodParameterKind.VALUE) {
                 ValueParameterDescriptor parameter = valueParameterIterator.next();
-                parameterName = parameter.getName().asString();
+                parameterName =
+                        parameter.getDestructuringVariables() == null
+                        ? parameter.getName().asString()
+                        : "$" + joinParameterNames(parameter.getDestructuringVariables());
             }
             else {
                 String lowercaseKind = kind.name().toLowerCase();
@@ -487,6 +495,25 @@ public class FunctionCodegen {
             mv.visitLocalVariable(parameterName, type.getDescriptor(), null, methodBegin, methodEnd, shift);
             shift += type.getSize();
         }
+
+        for (ValueParameterDescriptor parameter : valueParameters) {
+            if (parameter.getDestructuringVariables() == null) continue;
+
+            for (VariableDescriptor entry : parameter.getDestructuringVariables()) {
+                Type type = typeMapper.mapType(parameter.getType());
+                mv.visitLocalVariable(entry.getName().asString(), type.getDescriptor(), null, methodBegin, methodEnd, shift);
+                shift += type.getSize();
+            }
+        }
+    }
+
+    private static String joinParameterNames(@NotNull List<VariableDescriptor> variables) {
+        return CollectionsKt.joinToString(CollectionsKt.map(variables, new Function1<VariableDescriptor, String>() {
+            @Override
+            public String invoke(VariableDescriptor descriptor) {
+                return descriptor.getName().asString();
+            }
+        }), "_", "", "", -1, "...", null);
     }
 
     private static void generateFacadeDelegateMethodBody(
